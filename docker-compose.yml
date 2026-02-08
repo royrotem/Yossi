@@ -5,7 +5,7 @@ services:
     build: ./backend
     container_name: dept-graph-backend
     ports:
-      - "8000:8000"
+      - "8500:8000"
     volumes:
       - db-data:/app
     restart: unless-stopped
