@@ -4,6 +4,9 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
 from datetime import date
+import csv
+import io
+from fastapi.responses import StreamingResponse
 
 from models import SessionLocal, init_db, Department, AnnualGoal, Milestone
 
@@ -125,11 +128,27 @@ def milestone_to_dict(m: Milestone):
 
 
 # --- Department Endpoints ---
+# tree/full MUST come before {dept_id} to avoid route conflict
+
+@app.get("/api/departments/tree/full")
+def get_tree(db: Session = Depends(get_db)):
+    depts = db.query(Department).all()
+    dept_map = {d.id: {**dept_to_dict(d), "children": []} for d in depts}
+    roots = []
+    for d in depts:
+        node = dept_map[d.id]
+        if d.parent_id and d.parent_id in dept_map:
+            dept_map[d.parent_id]["children"].append(node)
+        else:
+            roots.append(node)
+    return roots
 
 @app.get("/api/departments")
-def list_departments(db: Session = Depends(get_db)):
-    depts = db.query(Department).all()
-    return [dept_to_dict(d) for d in depts]
+def list_departments(search: Optional[str] = None, db: Session = Depends(get_db)):
+    q = db.query(Department)
+    if search:
+        q = q.filter(Department.name.contains(search) | Department.name_en.contains(search))
+    return [dept_to_dict(d) for d in q.all()]
 
 @app.get("/api/departments/{dept_id}")
 def get_department(dept_id: int, db: Session = Depends(get_db)):
@@ -173,30 +192,19 @@ def delete_department(dept_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"ok": True}
 
-@app.get("/api/departments/tree/full")
-def get_tree(db: Session = Depends(get_db)):
-    depts = db.query(Department).all()
-    dept_map = {d.id: {**dept_to_dict(d), "children": []} for d in depts}
-    roots = []
-    for d in depts:
-        node = dept_map[d.id]
-        if d.parent_id and d.parent_id in dept_map:
-            dept_map[d.parent_id]["children"].append(node)
-        else:
-            roots.append(node)
-    return roots
-
 
 # --- Goals Endpoints ---
 
 @app.get("/api/goals")
 def list_goals(year: Optional[int] = None, department_id: Optional[int] = None,
-               db: Session = Depends(get_db)):
+               search: Optional[str] = None, db: Session = Depends(get_db)):
     q = db.query(AnnualGoal)
     if year:
         q = q.filter(AnnualGoal.year == year)
     if department_id:
         q = q.filter(AnnualGoal.department_id == department_id)
+    if search:
+        q = q.filter(AnnualGoal.title.contains(search))
     return [goal_to_dict(g) for g in q.all()]
 
 @app.post("/api/goals")
@@ -307,6 +315,20 @@ def get_stats(year: int, db: Session = Depends(get_db)):
     for s in ["planned", "in_progress", "completed", "cancelled"]:
         by_status[s] = sum(1 for g in goals if g.status == s)
 
+    by_department = []
+    all_depts = db.query(Department).filter(Department.level <= 1).all()
+    for dept in all_depts:
+        dept_goals = [g for g in goals if g.department_id == dept.id]
+        dept_ms = [m for m in milestones if m.department_id == dept.id]
+        if dept_goals or dept_ms:
+            by_department.append({
+                "id": dept.id, "name": dept.name, "color": dept.color,
+                "goals": len(dept_goals),
+                "completed": sum(1 for g in dept_goals if g.status == "completed"),
+                "avg_progress": round(sum(g.progress for g in dept_goals) / len(dept_goals), 1) if dept_goals else 0,
+                "milestones": len(dept_ms),
+            })
+
     return {
         "total_departments": depts,
         "total_goals": total_goals,
@@ -317,7 +339,49 @@ def get_stats(year: int, db: Session = Depends(get_db)):
         "by_quarter": by_quarter,
         "by_priority": by_priority,
         "by_status": by_status,
+        "by_department": by_department,
     }
+
+
+# --- Export ---
+
+@app.get("/api/export/goals")
+def export_goals_csv(year: int, db: Session = Depends(get_db)):
+    goals = db.query(AnnualGoal).filter(AnnualGoal.year == year).all()
+    depts = {d.id: d.name for d in db.query(Department).all()}
+    output = io.StringIO()
+    output.write('\ufeff')
+    writer = csv.writer(output)
+    writer.writerow(["ID", "Title", "Department", "Priority", "Status", "Progress %",
+                     "Quarter", "KPI Target", "KPI Current", "KPI Unit"])
+    for g in goals:
+        writer.writerow([g.id, g.title, depts.get(g.department_id, ""), g.priority,
+                         g.status, g.progress, g.quarter or "Annual",
+                         g.kpi_target, g.kpi_current, g.kpi_unit])
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=goals_{year}.csv"}
+    )
+
+@app.get("/api/export/milestones")
+def export_milestones_csv(year: int, db: Session = Depends(get_db)):
+    milestones = db.query(Milestone).filter(Milestone.year == year).all()
+    depts = {d.id: d.name for d in db.query(Department).all()}
+    output = io.StringIO()
+    output.write('\ufeff')
+    writer = csv.writer(output)
+    writer.writerow(["ID", "Title", "Department", "Due Date", "Quarter", "Status"])
+    for m in milestones:
+        writer.writerow([m.id, m.title, depts.get(m.department_id, ""),
+                         str(m.due_date) if m.due_date else "", m.quarter, m.status])
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=milestones_{year}.csv"}
+    )
 
 
 # --- Seed Data ---

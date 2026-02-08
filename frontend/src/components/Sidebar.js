@@ -7,13 +7,24 @@ const navItems = [
   { id: 'milestones', icon: '\u{1F6A9}', label: 'אבני דרך' },
 ];
 
-export default function Sidebar({ activePage, onNavigate }) {
+export default function Sidebar({ activePage, onNavigate, year, onYearChange }) {
   return (
     <div className="sidebar">
       <div className="sidebar-logo">
         מערכת גרף שנתי
         <small>ניהול אגפים | ארגון</small>
       </div>
+
+      <div className="sidebar-year">
+        <label>שנה</label>
+        <select value={year} onChange={e => onYearChange(Number(e.target.value))}>
+          <option value={2024}>2024</option>
+          <option value={2025}>2025</option>
+          <option value={2026}>2026</option>
+          <option value={2027}>2027</option>
+        </select>
+      </div>
+
       {navItems.map(item => (
         <button
           key={item.id}
